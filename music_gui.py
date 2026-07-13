@@ -144,18 +144,22 @@ class App(BaseTk):
         self.devices: list[dict] = []
         self._busy = False
         self.yt_cancel = threading.Event()
+        self.find_cancel = threading.Event()
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
         self.tab_dev = ttk.Frame(nb)
+        self.tab_find = ttk.Frame(nb)
         self.tab_yt = ttk.Frame(nb)
         self.tab_imp = ttk.Frame(nb)
         self.tab_exp = ttk.Frame(nb)
         nb.add(self.tab_dev, text="  Devices  ")
+        nb.add(self.tab_find, text="  Find  ")
         nb.add(self.tab_yt, text="  YouTube  ")
         nb.add(self.tab_imp, text="  Import  ")
         nb.add(self.tab_exp, text="  Export  ")
         self._build_devices()
+        self._build_finder()
         self._build_youtube()
         self._build_import()
         self._build_export()
@@ -198,6 +202,8 @@ class App(BaseTk):
                         self._yt_choose(payload)
                     elif kind == "yt_start":
                         self._yt_start(payload["url"], payload["extra"])
+                    elif kind == "find_versions":
+                        self._show_versions(payload)
                 except Exception as e:
                     print(f"ui event {kind} failed: {e}", file=sys.__stderr__)
         except queue.Empty:
@@ -377,6 +383,116 @@ class App(BaseTk):
             asyncio.run(_go())
 
         self.run_bg("Sending to VLC", work)
+
+    # ---- Find tab ----------------------------------------------------------
+    def _build_finder(self):
+        f = self.tab_find
+        row = ttk.Frame(f)
+        row.pack(fill="x", padx=8, pady=(10, 4))
+        ttk.Label(row, text="Song (Artist - Title):").pack(side="left")
+        self.find_q = ttk.Entry(row)
+        self.find_q.pack(side="left", fill="x", expand=True, padx=6)
+        self.find_q.bind("<Return>", lambda e: self.find_get_best())
+        ttk.Button(row, text="Search", command=self.find_search).pack(side="left")
+
+        row2 = ttk.Frame(f)
+        row2.pack(fill="x", padx=8, pady=4)
+        self.find_lossless_only = tk.BooleanVar(value=False)
+        self.find_add = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2, text="Lossless only",
+                        variable=self.find_lossless_only).pack(side="left")
+        ttk.Checkbutton(row2, text="Also add to Music.app library",
+                        variable=self.find_add).pack(side="left", padx=10)
+        ttk.Button(row2, text="⬇ Get the best (genuine lossless)",
+                   command=self.find_get_best).pack(side="left", padx=12)
+        ttk.Button(row2, text="Stop", command=lambda: (
+            self.find_cancel.set(),
+            self.q.put(("log", "Stopping after the current step...")))).pack(
+            side="left")
+
+        cols = ("provider", "format", "detail", "score")
+        self.findtree = ttk.Treeview(f, columns=cols, show="headings", height=8)
+        for c, w in zip(cols, (120, 130, 360, 70)):
+            self.findtree.heading(c, text=c.title())
+            self.findtree.column(c, width=w)
+        self.findtree.pack(fill="both", expand=True, padx=8, pady=4)
+
+        ttk.Label(f, justify="left", foreground="gray", text=(
+            "Type a song, Search to see matching versions from different legal "
+            "sources (Internet Archive,\nWikimedia, ccMixter, YouTube ...), then "
+            "Get the best: it identifies the recording, avoids fake\nlossless, "
+            "verifies the real audio quality, fixes tags + artwork, skips "
+            "duplicates, and adds it\nto Music. For personal use only. (First run "
+            "may fetch a bundled ffmpeg, ~50 MB.)"
+        )).pack(anchor="w", padx=10, pady=8)
+
+    def _finder_opts(self):
+        from finder.finder import FinderOptions
+        return FinderOptions(
+            want_lossless=True,
+            lossless_only=self.find_lossless_only.get(),
+            add_to_library=self.find_add.get())
+
+    def _version_rows(self, ranked):
+        rows = []
+        for c in ranked[:15]:
+            fmt = (c.codec or "?").upper() + (" lossless" if c.lossless_claimed else "")
+            rows.append((c.provider, fmt, c.label(),
+                         f"{c.extra.get('prescore', 0):.2f}"))
+        return rows
+
+    def _show_versions(self, rows):
+        self.findtree.delete(*self.findtree.get_children())
+        for r in rows:
+            self.findtree.insert("", "end", values=r)
+
+    def find_search(self):
+        q = self.find_q.get().strip()
+        if not q:
+            messagebox.showinfo("Find", "Type a song name first.")
+            return
+
+        def work():
+            from finder import identify
+            from finder import finder as fmod
+            self.q.put(("log", f"Searching for: {q}"))
+            recs = identify.search_recordings(q)
+            rec = recs[0] if recs else None
+            if rec:
+                self.q.put(("log", f"Best recording match: {rec.artist} - "
+                            f"{rec.title}"
+                            + (f"  [{rec.mbid}]" if rec.mbid else "  (unverified)")))
+            ranked = fmod.search_versions(rec, q, self._finder_opts(),
+                                          lambda m: self.q.put(("log", m)))
+            self.q.put(("find_versions", self._version_rows(ranked)))
+            self.q.put(("log", f"Found {len(ranked)} version(s). Click "
+                               "'Get the best' to download."))
+
+        self.run_bg("Searching sources", work)
+
+    def find_get_best(self):
+        q = self.find_q.get().strip()
+        if not q:
+            messagebox.showinfo("Find", "Type a song name first.")
+            return
+        self.find_cancel.clear()
+
+        def work():
+            from finder import finder as fmod
+
+            def cc(ranked):
+                self.q.put(("find_versions", self._version_rows(ranked)))
+                return ranked   # show the list, then proceed automatically
+
+            res = fmod.run_finder(q, self._finder_opts(),
+                                  log=lambda m: self.q.put(("log", m)),
+                                  cancel=self.find_cancel, choose_candidates=cc)
+            self.q.put(("log", f"== {res.status.upper()}: {res.message} =="))
+            if res.status == "added" and self.find_add.get():
+                self.q.put(("log", "Open Music.app -- the song is being added "
+                                   "automatically."))
+
+        self.run_bg("Finding best version", work)
 
     # ---- YouTube tab -------------------------------------------------------
     def _build_youtube(self):

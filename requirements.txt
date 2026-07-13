@@ -1,0 +1,20 @@
+# Music Manager -- Python dependencies (install into the recovery venv:
+#   ~/.venvs/ipad-recovery/bin/python -m pip install -r requirements.txt )
+
+# --- core (device recovery + import/export + YouTube) ---
+pymobiledevice3>=9.33
+mutagen>=1.48
+yt-dlp
+static_ffmpeg
+requests
+Pillow
+
+# --- Find feature (finder/) ---
+numpy               # required: spectral fake-lossless detection
+musicbrainzngs      # recommended: recording identification (degrades if absent)
+
+# --- optional extras (the app runs without these; it just degrades) ---
+# pyacoustid        # AcoustID/Chromaprint fingerprinting (also needs the `fpcalc`
+#                   #   binary on PATH -- e.g. `brew install chromaprint`)
+# rapidfuzz         # faster/better fuzzy matching (falls back to stdlib difflib)
+# tkinterdnd2       # drag-and-drop in the GUI Import tab
